@@ -38,7 +38,7 @@ import json
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QPushButton, QComboBox, 
                              QTextEdit, QGroupBox, QGridLayout, QMessageBox,
-                             QFileDialog, QSpinBox, QMenu, QAction, QDialog,
+                             QFileDialog, QSpinBox, QDoubleSpinBox, QMenu, QAction, QDialog,
                              QTableWidget, QTableWidgetItem, QTabWidget,
                              QScrollArea)
 from PyQt5.QtCore import QTimer, QThread, pyqtSignal, Qt
@@ -666,9 +666,17 @@ class TelemetryApp(QMainWindow):
         self.setGeometry(100, 100, 1400, 900)
         
         # Önce değişkenleri tanımla
-        self.max_data_points = 1000  # Maksimum veri noktası sayısı
+        self.max_data_points = 1000
         self.serial_thread = None
-        self.start_time = None  # Başlangıç zamanını takip etmek için
+        self.start_time = None
+        
+        # Mesafe takibi için değişkenler
+        self.total_distance = 0.0  # km cinsinden
+        self.last_speed_time = None
+        
+        # Hidrojen tüketimi için değişkenler
+        self.hydrogen_consumed_liters = 0.0  # Litre cinsinden
+        self.hydrogen_efficiency = 0.0  # km/m³
         
         # Veri depolama - sadece ihtiyaç duyulan veriler
         self.telemetry_data = {
@@ -676,6 +684,7 @@ class TelemetryApp(QMainWindow):
             'Current': {'values': [], 'times': []},
             'Voltage': {'values': [], 'times': []},
             'Power': {'values': [], 'times': []},
+            'Distance': {'values': [], 'times': []},  # Yeni: Mesafe verisi
             # Diğer veriler de parse edilecek ama grafik gösterilmeyecek
             'ERPM': {'values': [], 'times': []},
             'RPM': {'values': [], 'times': []},
@@ -834,7 +843,7 @@ class TelemetryApp(QMainWindow):
         
         # Veri analizi butonu (kontrol panelinde de)
         self.analyze_control_btn = QPushButton("📊 Veri Analizi")
-        self.analyze_control_btn.clicked.connect(self.show_data_analysis)
+        self.analyze_control_btn.clicked.connect(self.show_analysis)
         control_layout.addWidget(self.analyze_control_btn)
         
         control_layout.addStretch()
@@ -855,6 +864,9 @@ class TelemetryApp(QMainWindow):
             ("Current", "Akım (A):", "0.00"),
             ("Voltage", "Gerilim (V):", "0.00"),
             ("Power", "Güç (W):", "0.00"),
+            ("Distance", "Mesafe (km):", "0.000"),
+            ("Hydrogen", "H₂ (L):", "0.000"),  # Yeni: Hidrojen tüketimi
+            ("Efficiency", "1 m³ H₂ ile (km):", "0.00"),  # Değişti: 1 m³ ile gidilen yol
             ("RPM", "RPM:", "0"),
             ("ERPM", "ERPM:", "0"),
             ("Duty", "Duty (%):", "0.00")
@@ -863,11 +875,21 @@ class TelemetryApp(QMainWindow):
         for i, (key, label_text, default_value) in enumerate(labels):
             label = QLabel(label_text)
             label.setFont(font)
-            label.setStyleSheet("color: #ffffff; font-weight: bold;")  # Beyaz renk
+            label.setStyleSheet("color: #ffffff; font-weight: bold;")
             
             value_label = QLabel(default_value)
             value_label.setFont(font)
-            value_label.setStyleSheet("QLabel { color: #0066CC; font-weight: bold; }")
+            
+            # Özel renkler
+            if key == "Distance":
+                value_label.setStyleSheet("QLabel { color: #FFD700; font-weight: bold; }")  # Altın sarısı
+            elif key == "Hydrogen":
+                value_label.setStyleSheet("QLabel { color: #00CED1; font-weight: bold; }")  # Turkuaz (H₂)
+            elif key == "Efficiency":
+                value_label.setStyleSheet("QLabel { color: #32CD32; font-weight: bold; }")  # Lime yeşili
+            else:
+                value_label.setStyleSheet("QLabel { color: #0066CC; font-weight: bold; }")
+            
             value_label.setAlignment(Qt.AlignRight)
             
             values_layout.addWidget(label, i, 0)
@@ -876,21 +898,101 @@ class TelemetryApp(QMainWindow):
             self.value_labels[key] = value_label
         
         values_group.setMaximumWidth(300)
-        values_group.setMaximumHeight(280)
+        values_group.setMaximumHeight(380)  # Yükseklik artırıldı
         parent_layout.addWidget(values_group)
         parent_layout.addStretch()
+    
+    def create_log_panel(self, parent_layout):
+        """Log panelini ve kaydetme butonlarını oluştur"""
+        log_group = QGroupBox("İşlem Geçmişi")
+        log_layout = QVBoxLayout(log_group)
         
+        # Log metin alanı
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setMaximumHeight(150)
+        self.log_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #00ff00;
+                font-family: 'Courier New';
+                font-size: 10pt;
+                border: 1px solid #555555;
+            }
+        """)
+        log_layout.addWidget(self.log_text)
+        
+        # Hidrojen girişi bölümü
+        hydrogen_layout = QHBoxLayout()
+        
+        hydrogen_label = QLabel("Hidrojen Tüketimi (Litre):")
+        hydrogen_label.setStyleSheet("color: #ffffff; font-weight: bold;")
+        hydrogen_layout.addWidget(hydrogen_label)
+        
+        self.hydrogen_input = QDoubleSpinBox()
+        self.hydrogen_input.setRange(0.0, 100000.0)
+        self.hydrogen_input.setDecimals(3)  # 3 ondalık basamak
+        self.hydrogen_input.setSingleStep(0.1)  # 0.1 L adımlarla
+        self.hydrogen_input.setValue(0.0)
+        self.hydrogen_input.setSuffix(" L")
+        self.hydrogen_input.setStyleSheet("""
+            QDoubleSpinBox {
+                background-color: #2b2b2b;
+                color: #00CED1;
+                border: 2px solid #00CED1;
+                padding: 5px;
+                font-weight: bold;
+                font-size: 11pt;
+            }
+        """)
+        self.hydrogen_input.valueChanged.connect(self.update_hydrogen_consumption)
+        hydrogen_layout.addWidget(self.hydrogen_input)
+        
+        hydrogen_set_btn = QPushButton("🔄 Güncelle")
+        hydrogen_set_btn.clicked.connect(self.update_hydrogen_consumption)
+        hydrogen_set_btn.setStyleSheet("background-color: #00CED1; color: white; padding: 8px;")
+        hydrogen_layout.addWidget(hydrogen_set_btn)
+        
+        hydrogen_reset_btn = QPushButton("🗑️ Sıfırla")
+        hydrogen_reset_btn.clicked.connect(self.reset_hydrogen_consumption)
+        hydrogen_reset_btn.setStyleSheet("background-color: #FF5722; color: white; padding: 8px;")
+        hydrogen_layout.addWidget(hydrogen_reset_btn)
+        
+        hydrogen_layout.addStretch()
+        log_layout.addLayout(hydrogen_layout)
+        
+        # Kaydetme butonları
+        save_layout = QHBoxLayout()
+        
+        save_json_btn = QPushButton("📊 JSON Kaydet")
+        save_json_btn.clicked.connect(self.save_data_json)
+        save_json_btn.setStyleSheet("background-color: #2196F3; color: white; padding: 8px;")
+        save_layout.addWidget(save_json_btn)
+        
+        load_json_btn = QPushButton("📂 JSON Yükle")
+        load_json_btn.clicked.connect(self.load_data_json)
+        load_json_btn.setStyleSheet("background-color: #FF9800; color: white; padding: 8px;")
+        save_layout.addWidget(load_json_btn)
+        
+        analyze_btn = QPushButton("📈 Veri Analizi")
+        analyze_btn.clicked.connect(self.show_analysis)
+        analyze_btn.setStyleSheet("background-color: #9C27B0; color: white; padding: 8px;")
+        save_layout.addWidget(analyze_btn)
+        
+        log_layout.addLayout(save_layout)
+        parent_layout.addWidget(log_group)
+
     def create_graphs_panel(self, parent_layout):
-        """Grafik panelini oluştur - 4 grafik (duty olmadan)"""
+        """Grafik panelini oluştur - 4 grafik"""
         graphs_group = QGroupBox("Grafikler")
         graphs_layout = QVBoxLayout(graphs_group)
         
         # Grafik widget'ı oluştur
         self.graph_widget = pg.GraphicsLayoutWidget()
-        self.graph_widget.setBackground('#2b2b2b')  # Koyu arkaplan
+        self.graph_widget.setBackground('#2b2b2b')
         graphs_layout.addWidget(self.graph_widget)
         
-        # Alt grafikler oluştur - 4 tanesi (duty olmadan)
+        # Alt grafikler oluştur - 4 tanesi
         self.plots = {}
         self.curves = {}
         
@@ -901,12 +1003,13 @@ class TelemetryApp(QMainWindow):
             ('Power', 'Güç (W)', '#FF9800')
         ]
         
+        # 2 satır 2 sütun düzeni (2x2 grid)
         for i, (key, title, color) in enumerate(plot_configs):
             if i % 2 == 0 and i > 0:
                 self.graph_widget.nextRow()
             
             plot = self.graph_widget.addPlot(title=title)
-            plot.setLabel('bottom', 'Zaman (dakika)')  # Zaman ekseni dakika olarak değiştirildi
+            plot.setLabel('bottom', 'Zaman (dakika)')
             plot.setLabel('left', title)
             plot.showGrid(x=True, y=True, alpha=0.3)
             
@@ -919,64 +1022,52 @@ class TelemetryApp(QMainWindow):
             plot.getAxis('left').setTextPen('#cccccc')
             plot.getAxis('bottom').setTextPen('#cccccc')
             
-            # Sağ tık menüsü için plot widget'ına özel özellik ekle
-            plot.setMenuEnabled(False)  # Varsayılan menüyü devre dışı bırak
+            # Sağ tık menüsü
+            plot.setMenuEnabled(False)
             
-            # Custom context menu için mouse event'i ekle
             def make_context_menu_handler(graph_key, graph_title):
                 def context_menu_handler(event):
                     if event.button() == Qt.RightButton:
-                        # Global koordinatları al
                         global_pos = self.graph_widget.mapToGlobal(event.pos())
                         self.show_graph_context_menu(graph_key, graph_title, global_pos)
                 return context_menu_handler
             
-            # Mouse press event'ini bağla
             plot.scene().sigMouseClicked.connect(make_context_menu_handler(key, title))
             
-            # Veri noktası değerlerini göstermek için crosshair ekleme
+            # Veri eğrisi
             curve = plot.plot(pen=pg.mkPen(color, width=2), name=title, 
                             symbol='o', symbolSize=4, symbolBrush=color, symbolPen=color)
             
-            # Crosshair (fare imleciyle veri değeri gösterme)
+            # Crosshair
             vLine = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('#FFFFFF', width=1, style=Qt.DashLine))
             hLine = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('#FFFFFF', width=1, style=Qt.DashLine))
             plot.addItem(vLine, ignoreBounds=True)
             plot.addItem(hLine, ignoreBounds=True)
             
-            # Değer gösterme label'ı
             value_label = pg.TextItem(anchor=(0, 1), color='#FFFFFF', fill='#000000')
             plot.addItem(value_label, ignoreBounds=True)
             
-            # Mouse move event'ini bağla
             def make_mouse_moved_handler(plot_item, v_line, h_line, curve_item, value_label_item, data_key):
                 def mouse_moved(evt):
                     try:
-                        # PyQtGraph sürümüne göre evt parametresini kontrol et
                         if isinstance(evt, tuple) and len(evt) > 0:
-                            # Eski PyQtGraph sürümü (tuple olarak gelir)
                             pos = evt[0]
                         else:
-                            # Yeni PyQtGraph sürümü (doğrudan QPointF olarak gelir)
                             pos = evt
                         
                         if plot_item.sceneBoundingRect().contains(pos):
                             mousePoint = plot_item.vb.mapSceneToView(pos)
                             
-                            # Crosshair'ı güncelle
                             v_line.setPos(mousePoint.x())
                             h_line.setPos(mousePoint.y())
                             
-                            # En yakın veri noktasını bul ve değeri göster
                             if data_key in self.telemetry_data and self.telemetry_data[data_key]['times']:
                                 times = self.telemetry_data[data_key]['times']
                                 values = self.telemetry_data[data_key]['values']
                                 
                                 if times and self.start_time:
-                                    # Dakika cinsinden relative times
                                     relative_times = [(t - self.start_time) / 60.0 for t in times]
                                     
-                                    # En yakın noktayı bul
                                     target_time = mousePoint.x()
                                     if relative_times:
                                         closest_idx = min(range(len(relative_times)), 
@@ -986,11 +1077,9 @@ class TelemetryApp(QMainWindow):
                                             closest_value = values[closest_idx]
                                             closest_time = relative_times[closest_idx]
                                             
-                                            # Değeri göster
                                             value_label_item.setText(f'Zaman: {closest_time:.2f} dk\nDeğer: {closest_value:.2f}')
                                             value_label_item.setPos(mousePoint.x(), mousePoint.y())
                     except Exception as e:
-                        # Hataları sessizce yakala ve devam et
                         pass
                 
                 return mouse_moved
@@ -1001,504 +1090,79 @@ class TelemetryApp(QMainWindow):
             self.curves[key] = curve
         
         parent_layout.addWidget(graphs_group)
+
+    def calculate_distance(self, current_speed, current_time):
+        """Hız ve zaman farkından mesafe hesapla"""
+        if self.last_speed_time is not None and current_speed > 0:
+            # Zaman farkı (saniye cinsinden)
+            time_diff = (current_time - self.last_speed_time)
+            
+            # Mesafe = Hız × Zaman
+            # Hız km/h cinsinden, zaman saniye cinsinden
+            # Sonuç km cinsinden
+            distance_increment = (current_speed * time_diff) / 3600.0
+            
+            self.total_distance += distance_increment
+        
+        self.last_speed_time = current_time
     
-    def save_single_graph(self, graph_key, graph_title):
-        """Tek bir grafiği kaydet"""
-        if graph_key not in self.plots:
-            QMessageBox.warning(self, "Hata", f"Grafik bulunamadı: {graph_title}")
-            return
+    def update_hydrogen_consumption(self):
+        """Hidrojen tüketimini güncelle ve verimlilik hesapla"""
+        self.hydrogen_consumed_liters = self.hydrogen_input.value()
         
-        # Dosya adını oluştur
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        default_filename = f"{graph_title.replace(' ', '_').replace('(', '').replace(')', '')}_{timestamp}.png"
-        
-        filename, _ = QFileDialog.getSaveFileName(
-            self, f"{graph_title} Grafiği Kaydet", 
-            default_filename,
-            "PNG files (*.png);;JPG files (*.jpg)"
-        )
-        
-        if filename:
-            try:
-                # Yöntem 1: PyQtGraph exporters ile dene
-                try:
-                    plot_widget = self.plots[graph_key]
-                    
-                    # Farklı exporter import yöntemlerini dene
-                    try:
-                        from pyqtgraph.exporters import ImageExporter
-                        exporter = ImageExporter(plot_widget)
-                    except ImportError:
-                        import pyqtgraph.exporters
-                        exporter = pyqtgraph.exporters.ImageExporter(plot_widget)
-                    
-                    exporter.parameters()['width'] = 1200
-                    exporter.parameters()['height'] = 800
-                    exporter.export(filename)
-                    
-                    self.log_message(f"📸 Grafik kaydedildi (PyQtGraph): {graph_title} -> {filename}")
-                    QMessageBox.information(self, "Başarılı", f"Grafik kaydedildi:\n{filename}")
-                    return
-                    
-                except Exception as e:
-                    self.log_message(f"⚠️ PyQtGraph exporters hatası: {e}")
-                
-                # Yöntem 2: QPixmap ile screenshot
-                try:
-                    plot_widget = self.plots[graph_key]
-                    pixmap = plot_widget.grab()
-                    pixmap.save(filename)
-                    
-                    self.log_message(f"📸 Grafik kaydedildi (QPixmap): {graph_title} -> {filename}")
-                    QMessageBox.information(self, "Başarılı", f"Grafik kaydedildi (screenshot):\n{filename}")
-                    return
-                    
-                except Exception as e:
-                    self.log_message(f"⚠️ QPixmap hatası: {e}")
-                
-                # Yöntem 3: Matplotlib alternatifi
-                self.log_message(f"🔄 Matplotlib alternatifi kullanılıyor...")
-                self.save_graph_with_matplotlib(graph_key, graph_title, filename)
-                
-            except Exception as e:
-                QMessageBox.critical(self, "Hata", f"Grafik kaydetme hatası:\n{str(e)}")
-    
-    def save_graph_with_matplotlib(self, graph_key, graph_title, filename):
-        """Matplotlib ile grafik kaydet (alternatif yöntem)"""
-        try:
-            import matplotlib.pyplot as plt
-            from matplotlib.dates import DateFormatter
-            import matplotlib.dates as mdates
-            
-            # Veriyi al
-            if graph_key not in self.telemetry_data:
-                raise Exception(f"Veri bulunamadı: {graph_key}")
-            
-            times = self.telemetry_data[graph_key]['times']
-            values = self.telemetry_data[graph_key]['values']
-            
-            if not times or not values:
-                raise Exception("Grafik verisi boş!")
-            
-            # Zaman verilerini datetime'a çevir
-            datetime_times = [datetime.fromtimestamp(t) for t in times]
-            
-            # Matplotlib grafiği oluştur
-            plt.figure(figsize=(12, 8))
-            plt.plot(datetime_times, values, marker='o', markersize=2, linewidth=1.5)
-            plt.title(graph_title, fontsize=16, fontweight='bold')
-            plt.xlabel('Zaman', fontsize=12)
-            plt.ylabel(graph_title, fontsize=12)
-            plt.grid(True, alpha=0.3)
-            
-            # Zaman ekseni formatla
-            plt.gca().xaxis.set_major_formatter(DateFormatter('%H:%M:%S'))
-            plt.xticks(rotation=45)
-            
-            plt.tight_layout()
-            plt.savefig(filename, dpi=150, bbox_inches='tight')
-            plt.close()
-            
-            self.log_message(f"📸 Matplotlib ile grafik kaydedildi: {graph_title} -> {filename}")
-            QMessageBox.information(self, "Başarılı", f"Grafik kaydedildi (matplotlib):\n{filename}")
-            
-        except ImportError:
-            QMessageBox.critical(self, "Hata", "Matplotlib kurulu değil!\npip install matplotlib")
-        except Exception as e:
-            QMessageBox.critical(self, "Hata", f"Matplotlib grafik kaydetme hatası:\n{str(e)}")
-    
-    def save_all_graphs(self):
-        """Tüm grafikleri tek dosyada kaydet"""
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        default_filename = f"telemetri_grafikleri_{timestamp}.png"
-        
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "Tüm Grafikler Kaydet", 
-            default_filename,
-            "PNG files (*.png);;JPG files (*.jpg)"
-        )
-        
-        if filename:
-            try:
-                # Yöntem 1: PyQtGraph exporters ile dene
-                try:
-                    try:
-                        from pyqtgraph.exporters import ImageExporter
-                        exporter = ImageExporter(self.graph_widget)
-                    except ImportError:
-                        import pyqtgraph.exporters
-                        exporter = pyqtgraph.exporters.ImageExporter(self.graph_widget)
-                    
-                    exporter.parameters()['width'] = 1600
-                    exporter.parameters()['height'] = 1200
-                    exporter.export(filename)
-                    
-                    self.log_message(f"📸 Tüm grafikler kaydedildi (PyQtGraph): {filename}")
-                    QMessageBox.information(self, "Başarılı", f"Tüm grafikler kaydedildi:\n{filename}")
-                    return
-                    
-                except Exception as e:
-                    self.log_message(f"⚠️ PyQtGraph exporters hatası: {e}")
-                
-                # Yöntem 2: QPixmap ile screenshot
-                try:
-                    pixmap = self.graph_widget.grab()
-                    pixmap.save(filename)
-                    
-                    self.log_message(f"📸 Tüm grafikler kaydedildi (QPixmap): {filename}")
-                    QMessageBox.information(self, "Başarılı", f"Tüm grafikler kaydedildi (screenshot):\n{filename}")
-                    return
-                    
-                except Exception as e:
-                    self.log_message(f"⚠️ QPixmap hatası: {e}")
-                
-                # Yöntem 3: Matplotlib alternatifi
-                self.log_message(f"🔄 Matplotlib alternatifi kullanılıyor...")
-                self.save_all_graphs_with_matplotlib(filename)
-                
-            except Exception as e:
-                QMessageBox.critical(self, "Hata", f"Grafik kaydetme hatası:\n{str(e)}")
-    
-    def save_all_graphs_with_matplotlib(self, filename):
-        """Matplotlib ile tüm grafikleri kaydet"""
-        try:
-            import matplotlib.pyplot as plt
-            from matplotlib.dates import DateFormatter
-            import matplotlib.dates as mdates
-            
-            # 2x2 subplot düzeni
-            fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-            fig.suptitle('Arduino Telemetri Grafikleri', fontsize=16, fontweight='bold')
-            
-            plot_configs = [
-                ('Speed', 'Hız (km/h)', '#FF6B35'),
-                ('Current', 'Akım (A)', '#FF1744'),
-                ('Voltage', 'Gerilim (V)', '#00C853'),
-                ('Power', 'Güç (W)', '#FF9800')
-            ]
-            
-            for i, (key, title, color) in enumerate(plot_configs):
-                row = i // 2
-                col = i % 2
-                ax = axes[row, col]
-                
-                if key in self.telemetry_data:
-                    times = self.telemetry_data[key]['times']
-                    values = self.telemetry_data[key]['values']
-                    
-                    if times and values:
-                        datetime_times = [datetime.fromtimestamp(t) for t in times]
-                        ax.plot(datetime_times, values, color=color, marker='o', markersize=1, linewidth=1)
-                        ax.set_title(title, fontweight='bold')
-                        ax.set_xlabel('Zaman')
-                        ax.set_ylabel(title)
-                        ax.grid(True, alpha=0.3)
-                        ax.xaxis.set_major_formatter(DateFormatter('%H:%M:%S'))
-                        
-                        # X ekseni etiketlerini döndür
-                        for label in ax.get_xticklabels():
-                            label.set_rotation(45)
-                    else:
-                        ax.text(0.5, 0.5, 'Veri Yok', ha='center', va='center', transform=ax.transAxes)
-                        ax.set_title(title, fontweight='bold')
-            
-            plt.tight_layout()
-            plt.savefig(filename, dpi=150, bbox_inches='tight')
-            plt.close()
-            
-            self.log_message(f"📸 Matplotlib ile tüm grafikler kaydedildi: {filename}")
-            QMessageBox.information(self, "Başarılı", f"Tüm grafikler kaydedildi (matplotlib):\n{filename}")
-            
-        except ImportError:
-            QMessageBox.critical(self, "Hata", "Matplotlib kurulu değil!\npip install matplotlib")
-        except Exception as e:
-            QMessageBox.critical(self, "Hata", f"Matplotlib grafik kaydetme hatası:\n{str(e)}")
-    
-    def show_graph_context_menu(self, graph_key, graph_title, position):
-        """Grafik için sağ tık menüsü göster"""
-        context_menu = QMenu(self)
-        
-        # Tek grafik kaydetme
-        save_action = QAction(f"📸 {graph_title} Grafiğini Kaydet", self)
-        save_action.triggered.connect(lambda: self.save_single_graph(graph_key, graph_title))
-        context_menu.addAction(save_action)
-        
-        # Ayırıcı
-        context_menu.addSeparator()
-        
-        # Tüm grafikler kaydetme
-        save_all_action = QAction("📸 Tüm Grafikleri Kaydet", self)
-        save_all_action.triggered.connect(self.save_all_graphs)
-        context_menu.addAction(save_all_action)
-        
-        # Grafik temizleme
-        clear_action = QAction(f"🗑️ {graph_title} Grafiğini Temizle", self)
-        clear_action.triggered.connect(lambda: self.clear_single_graph(graph_key, graph_title))
-        context_menu.addAction(clear_action)
-        
-        # Menüyü göster
-        context_menu.exec_(position)
-    
-    def clear_single_graph(self, graph_key, graph_title):
-        """Tek bir grafiği temizle"""
-        if graph_key in self.telemetry_data:
-            self.telemetry_data[graph_key]['values'].clear()
-            self.telemetry_data[graph_key]['times'].clear()
-            
-            if graph_key in self.curves:
-                self.curves[graph_key].setData([], [])
-            
-            if graph_key in self.value_labels:
-                self.value_labels[graph_key].setText("0.00")
-            
-            # Hız gösterimini de güncelle
-            if graph_key == 'Speed':
-                self.speed_display.set_speed(0.0)
-        
-        self.log_message(f"🗑️ {graph_title} grafiği temizlendi.")
-        
-    def create_log_panel(self, parent_layout):
-        """Log ve kaydetme panelini oluştur"""
-        log_group = QGroupBox("Log ve Kaydetme")
-        log_layout = QVBoxLayout(log_group)
-        
-        # Üst kısım - kontroller
-        top_layout = QHBoxLayout()
-        
-        # Maksimum veri noktası ayarı
-        top_layout.addWidget(QLabel("Maks. Veri Noktası:"))
-        self.max_points_spin = QSpinBox()
-        self.max_points_spin.setRange(100, 10000)
-        self.max_points_spin.setValue(self.max_data_points)
-        self.max_points_spin.valueChanged.connect(self.update_max_points)
-        top_layout.addWidget(self.max_points_spin)
-        
-        top_layout.addStretch()
-        
-        # Kaydetme butonları
-        self.save_csv_btn = QPushButton("CSV Olarak Kaydet")
-        self.save_csv_btn.clicked.connect(self.save_data_csv)
-        top_layout.addWidget(self.save_csv_btn)
-        
-        self.save_json_btn = QPushButton("JSON Olarak Kaydet")
-        self.save_json_btn.clicked.connect(self.save_data_json)
-        top_layout.addWidget(self.save_json_btn)
-        
-        # JSON dosyası yükleme butonu
-        self.load_json_btn = QPushButton("📂 JSON Dosyası Yükle")
-        self.load_json_btn.clicked.connect(self.load_data_json)
-        top_layout.addWidget(self.load_json_btn)
-        
-        # JSON analiz butonu
-        self.analyze_json_btn = QPushButton("📊 Veri Analizi")
-        self.analyze_json_btn.clicked.connect(self.show_data_analysis)
-        top_layout.addWidget(self.analyze_json_btn)
-        
-        # Tekil grafik kaydetme - güncellenen seçenekler
-        top_layout.addWidget(QLabel("Grafik Kaydet:"))
-        self.graph_combo = QComboBox()
-        self.graph_combo.addItem("Tüm Grafikler")
-        self.graph_combo.addItem("Hız Grafiği")
-        self.graph_combo.addItem("Akım Grafiği")
-        self.graph_combo.addItem("Gerilim Grafiği")
-        self.graph_combo.addItem("Güç Grafiği")
-        top_layout.addWidget(self.graph_combo)
-        
-        self.save_graph_btn = QPushButton("📸 Grafik Kaydet")
-        self.save_graph_btn.clicked.connect(self.save_selected_graph)
-        top_layout.addWidget(self.save_graph_btn)
-        
-        log_layout.addLayout(top_layout)
-        
-        # Ortada - Log text alanı ve logolar
-        middle_layout = QHBoxLayout()
-        
-        # Sol taraf - Log text alanı
-        self.log_text = QTextEdit()
-        self.log_text.setMaximumHeight(150)
-        self.log_text.setReadOnly(True)
-        middle_layout.addWidget(self.log_text, 3)  # 3/4 genişlik
-        
-        # Sağ taraf - Takım logoları
-        logos_layout = QVBoxLayout()
-        
-        # KATOT logosu
-        katot_logo_path = os.path.join('images', 'katot.png')
-        if os.path.exists(katot_logo_path):
-            katot_label = QLabel()
-            katot_pixmap = QPixmap(katot_logo_path)
-            if not katot_pixmap.isNull():
-                # Logoyu eski boyutlandır
-                scaled_katot = katot_pixmap.scaled(80, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                katot_label.setPixmap(scaled_katot)
-                katot_label.setAlignment(Qt.AlignCenter)
-                katot_label.setStyleSheet("border: 1px solid #555555; border-radius: 4px; padding: 5px; background-color: rgba(255, 255, 255, 20);")
-                logos_layout.addWidget(katot_label)
-        
-        # Boşluk
-        logos_layout.addSpacing(10)
-        
-        # KTECH logosu
-        ktech_logo_path = os.path.join('images', 'ktech.png')
-        if os.path.exists(ktech_logo_path):
-            ktech_label = QLabel()
-            ktech_pixmap = QPixmap(ktech_logo_path)
-            if not ktech_pixmap.isNull():
-                # Logoyu eski boyutlandır
-                scaled_ktech = ktech_pixmap.scaled(80, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                ktech_label.setPixmap(scaled_ktech)
-                ktech_label.setAlignment(Qt.AlignCenter)
-                ktech_label.setStyleSheet("border: 1px solid #555555; border-radius: 4px; padding: 5px; background-color: rgba(255, 255, 255, 20);")
-                logos_layout.addWidget(ktech_label)
-        
-        logos_layout.addStretch()
-        middle_layout.addLayout(logos_layout, 1)  # 1/4 genişlik
-        
-        log_layout.addLayout(middle_layout)
-        
-        log_group.setMaximumHeight(250)
-        parent_layout.addWidget(log_group)
-    
-    def save_selected_graph(self):
-        """Seçilen grafiği kaydet"""
-        selected_text = self.graph_combo.currentText()
-        
-        # Grafik mapping - güncellendi
-        graph_mapping = {
-            "Tüm Grafikler": None,
-            "Hız Grafiği": ("Speed", "Hız (km/h)"),
-            "Akım Grafiği": ("Current", "Akım (A)"),
-            "Gerilim Grafiği": ("Voltage", "Gerilim (V)"),
-            "Güç Grafiği": ("Power", "Güç (W)")
-        }
-        
-        if selected_text == "Tüm Grafikler":
-            self.save_all_graphs()
-        elif selected_text in graph_mapping:
-            graph_key, graph_title = graph_mapping[selected_text]
-            self.save_single_graph(graph_key, graph_title)
+        # Verimlilik hesapla: km/m³
+        if self.hydrogen_consumed_liters > 0:
+            hydrogen_m3 = self.hydrogen_consumed_liters / 1000.0  # Litre → m³
+            self.hydrogen_efficiency = self.total_distance / hydrogen_m3 if hydrogen_m3 > 0 else 0.0
         else:
-            QMessageBox.warning(self, "Hata", "Geçersiz grafik seçimi!")
+            self.hydrogen_efficiency = 0.0
         
-    def update_port_list(self):
-        """Mevcut seri portları listele"""
-        self.port_combo.clear()
-        ports = serial.tools.list_ports.comports()
+        # Göstergeleri güncelle
+        if 'Hydrogen' in self.value_labels:
+            self.value_labels['Hydrogen'].setText(f"{self.hydrogen_consumed_liters:.3f}")
         
-        arduino_ports = []
-        esp_ports = []
-        other_ports = []
-        
-        for port in ports:
-            # Port tipini sınıflandır
-            port_icon, port_category = classify_port(port)
-            
-            # VID/PID bilgisi varsa ekle
-            vid_pid_info = ""
-            if hasattr(port, 'vid') and hasattr(port, 'pid') and port.vid and port.pid:
-                vid_pid_info = f" [VID:PID={port.vid:04X}:{port.pid:04X}]"
-            
-            # Detaylı port bilgisi oluştur
-            port_info = f"{port.device} - {port_icon} - {port.description}{vid_pid_info}"
-            
-            # Port kategorisine göre grupla
-            if port_category in ["Arduino", "ESP"]:
-                if port_category == "Arduino":
-                    arduino_ports.append(port_info)
-                else:
-                    esp_ports.append(port_info)
-            else:
-                other_ports.append(port_info)
-        
-        # Virtual port seçeneği ekle
-        self.port_combo.addItem("🖥️ Virtual Arduino Simulator - TCP localhost:9999")
-        
-        # Öncelik sırası: Virtual -> Arduino -> ESP -> Diğerleri
-        all_ports = arduino_ports + esp_ports + other_ports
-        for port_info in all_ports:
-            self.port_combo.addItem(port_info)
-        
-        if not ports:
-            self.port_combo.addItem("❌ Port bulunamadı")
+        if 'Efficiency' in self.value_labels:
+            self.value_labels['Efficiency'].setText(f"{self.hydrogen_efficiency:.2f}")
         
         # Log mesajı
-        total_ports = len(ports)
-        arduino_count = len(arduino_ports)
-        esp_count = len(esp_ports)
-        self.log_message(f"📡 Port taraması: {total_ports} port bulundu (Arduino: {arduino_count}, ESP: {esp_count}, Diğer: {len(other_ports)})")
+        self.log_message(f"💧 Hidrojen: {self.hydrogen_consumed_liters:.3f} L | "
+                        f"1 m³ ile: {self.hydrogen_efficiency:.2f} km")
+        
+        # Bilgi mesajı
+        if self.hydrogen_efficiency > 0:
+            QMessageBox.information(self, "Hidrojen Verimlilik Hesaplandı",
+                                  f"📊 Hidrojen Verimlilik Raporu\n\n"
+                                  f"🛣️ Toplam Mesafe: {self.total_distance:.3f} km\n"
+                                  f"💧 Hidrojen Tüketimi: {self.hydrogen_consumed_liters:.3f} L\n"
+                                  f"📦 Hidrojen Hacmi: {self.hydrogen_consumed_liters/1000:.3f} m³\n\n"
+                                  f"✨ 1 m³ Hidrojen ile Gidilen Yol\n"
+                                  f"   {self.hydrogen_efficiency:.2f} km\n\n"
+                                  f"💡 Yani 1 metreküp (1000 L) hidrojen ile\n"
+                                  f"   {self.hydrogen_efficiency:.2f} kilometre yol alınabilir.")
+    
+    def reset_hydrogen_consumption(self):
+        """Hidrojen tüketimini sıfırla"""
+        self.hydrogen_consumed_liters = 0.0
+        self.hydrogen_efficiency = 0.0
+        self.hydrogen_input.setValue(0.0)
+        
+        if 'Hydrogen' in self.value_labels:
+            self.value_labels['Hydrogen'].setText("0.000")
+        
+        if 'Efficiency' in self.value_labels:
+            self.value_labels['Efficiency'].setText("0.00")
+        
+        self.log_message("🗑️ Hidrojen tüketimi sıfırlandı")
+    
+    def calculate_efficiency_on_distance_change(self):
+        """Mesafe değiştiğinde verimlilik otomatik hesapla"""
+        if self.hydrogen_consumed_liters > 0:
+            hydrogen_m3 = self.hydrogen_consumed_liters / 1000.0
+            self.hydrogen_efficiency = self.total_distance / hydrogen_m3 if hydrogen_m3 > 0 else 0.0
             
-    def toggle_connection(self):
-        """Seri port/TCP bağlantısını aç/kapat"""
-        if self.serial_thread and self.serial_thread.is_running:
-            # Bağlantıyı kes
-            self.serial_thread.stop()
-            self.serial_thread.wait()
-            self.serial_thread = None
-            
-            self.connect_btn.setText("Bağlan")
-            self.connect_btn.setStyleSheet("")
-            self.log_message("🔌 Bağlantı kesildi.")
-            
-        else:
-            # Bağlantı kur
-            current_port_text = self.port_combo.currentText()
-            if "❌ Port bulunamadı" in current_port_text:
-                QMessageBox.warning(self, "Hata", "Geçerli bir port seçin!")
-                return
-            
-            # Virtual port kontrolü
-            if "🖥️ Virtual Arduino Simulator" in current_port_text:
-                # TCP bağlantısı
-                host = "localhost"
-                tcp_port = 9999
-                port_type = "Virtual Arduino (TCP)"
-                
-                self.serial_thread = TCPThread(host, tcp_port)
-                self.serial_thread.data_received.connect(self.update_data)
-                self.serial_thread.error_occurred.connect(self.handle_error)
-                self.serial_thread.start()
-                
-                self.connect_btn.setText("Bağlantıyı Kes")
-                self.connect_btn.setStyleSheet("background-color: red; color: white;")
-                self.log_message(f"🖥️ Virtual Arduino bağlantısı kuruldu: {host}:{tcp_port}")
-                return
-                
-            # Port adını ayıkla (emoji ve açıklamadan temizle)
-            port = current_port_text.split(" - ")[0]
-            baudrate = int(self.baudrate_combo.currentText())
-            
-            # Port tipini belirle
-            if "🔧 Arduino" in current_port_text:
-                port_type = "Arduino"
-            elif "🌐 ESP Board" in current_port_text:
-                port_type = "ESP Board"
-            elif "📶 Bluetooth" in current_port_text:
-                port_type = "Bluetooth"
-                # Bluetooth bağlantısı için uyarı ver
-                reply = QMessageBox.question(self, "Bluetooth Bağlantısı", 
-                                           f"Bluetooth port ({port}) seçtiniz.\n"
-                                           "Bu port genelde Arduino bağlantısı için uygun değildir.\n"
-                                           "Arduino'nuz Bluetooth modülü ile mi bağlı?\n\n"
-                                           "Devam etmek istiyor musunuz?",
-                                           QMessageBox.Yes | QMessageBox.No)
-                if reply == QMessageBox.No:
-                    return
-            elif "🔌 USB Serial" in current_port_text:
-                port_type = "USB Serial"
-            elif "📟 Serial" in current_port_text:
-                port_type = "Serial"
-            else:
-                port_type = "Bilinmeyen"
-            
-            self.serial_thread = SerialThread(port, baudrate)
-            self.serial_thread.data_received.connect(self.update_data)
-            self.serial_thread.error_occurred.connect(self.handle_error)
-            self.serial_thread.start()
-            
-            self.connect_btn.setText("Bağlantıyı Kes")
-            self.connect_btn.setStyleSheet("background-color: red; color: white;")
-            self.log_message(f"📡 Bağlantı kuruldu: {port} ({port_type}) @ {baudrate} baud")
-            
+            if 'Efficiency' in self.value_labels:
+                self.value_labels['Efficiency'].setText(f"{self.hydrogen_efficiency:.2f}")
+
     def update_data(self, data):
         """Yeni veri geldiğinde güncelle"""
         data_type = data['type']
@@ -1509,6 +1173,29 @@ class TelemetryApp(QMainWindow):
         if self.start_time is None:
             self.start_time = timestamp.timestamp()
         
+        # Hız verisi geldiğinde mesafe hesapla
+        if data_type == 'Speed':
+            old_distance = self.total_distance
+            self.calculate_distance(value, timestamp.timestamp())
+            
+            # Mesafe verisini de kaydet
+            self.telemetry_data['Distance']['values'].append(self.total_distance)
+            self.telemetry_data['Distance']['times'].append(timestamp.timestamp())
+            
+            # Maksimum veri noktası kontrolü
+            if len(self.telemetry_data['Distance']['values']) > self.max_data_points:
+                self.telemetry_data['Distance']['values'].pop(0)
+                self.telemetry_data['Distance']['times'].pop(0)
+            
+            # Mesafe değerini güncelle
+            if 'Distance' in self.value_labels:
+                self.value_labels['Distance'].setText(f"{self.total_distance:.3f}")
+            
+            # Mesafe değiştiğinde verimlilik hesapla (otomatik)
+            if old_distance != self.total_distance:
+                self.calculate_efficiency_on_distance_change()
+        
+        # Diğer veri tipleri için güncelleme
         if data_type in self.telemetry_data:
             # Veriyi depola
             self.telemetry_data[data_type]['values'].append(value)
@@ -1522,34 +1209,46 @@ class TelemetryApp(QMainWindow):
             # Anlık değeri güncelle - tüm değerler için
             if data_type in self.value_labels:
                 if data_type in ['RPM', 'ERPM']:
-                    # RPM ve ERPM için tam sayı göster
                     self.value_labels[data_type].setText(f"{int(value)}")
                 else:
-                    # Diğerleri için ondalıklı göster
                     self.value_labels[data_type].setText(f"{value:.2f}")
             
             # Hız gösterimini güncelle
             if data_type == 'Speed':
                 self.speed_display.set_speed(value)
             
-            # Grafiği güncelle - sadece ana 4 grafik için
+            # Grafiği güncelle - ana grafikler için
             if data_type in self.curves and data_type in ['Speed', 'Current', 'Voltage', 'Power']:
                 times = self.telemetry_data[data_type]['times']
                 values = self.telemetry_data[data_type]['values']
                 
                 if times and self.start_time:
-                    # Zaman eksenini dakika cinsinden relative yapmak için ilk zamanı çıkar ve 60'a böl
                     relative_times = [(t - self.start_time) / 60.0 for t in times]
                     self.curves[data_type].setData(relative_times, values)
         
         # Log mesajı
         log_msg = f"{data['timestamp']} - {data_type}: {value}"
+        if data_type == 'Speed':
+            log_msg += f" | Mesafe: {self.total_distance:.3f} km"
+            if self.hydrogen_efficiency > 0:
+                log_msg += f" | 1m³ ile: {self.hydrogen_efficiency:.2f} km"
         self.log_message(log_msg)
-    
+
     def clear_data(self):
         """Tüm veriyi ve grafikleri temizle"""
         # Başlangıç zamanını sıfırla
         self.start_time = None
+        
+        # Mesafe verilerini sıfırla
+        self.total_distance = 0.0
+        self.last_speed_time = None
+        
+        # Hidrojen verilerini KORUYALIM (kullanıcı manuel girdiği için)
+        # self.hydrogen_consumed_liters = 0.0  # KALDIRILDI
+        # self.hydrogen_efficiency = 0.0  # KALDIRILDI
+        
+        # Verimlilik yeniden hesapla (mesafe sıfırlandığında)
+        self.calculate_efficiency_on_distance_change()
         
         for key in self.telemetry_data:
             self.telemetry_data[key]['values'].clear()
@@ -1561,106 +1260,20 @@ class TelemetryApp(QMainWindow):
             if key in self.value_labels:
                 if key in ['RPM', 'ERPM']:
                     self.value_labels[key].setText("0")
+                elif key == 'Distance':
+                    self.value_labels[key].setText("0.000")
+                elif key == 'Hydrogen':
+                    self.value_labels[key].setText(f"{self.hydrogen_consumed_liters:.3f}")
+                elif key == 'Efficiency':
+                    self.value_labels[key].setText(f"{self.hydrogen_efficiency:.2f}")
                 else:
                     self.value_labels[key].setText("0.00")
         
         # Hız gösterimini sıfırla
         self.speed_display.set_speed(0.0)
         
-        self.log_message("Tüm veriler temizlendi.")
-    
-    def update_max_points(self):
-        """Maksimum veri noktası sayısını güncelle"""
-        self.max_data_points = self.max_points_spin.value()
-        self.log_message(f"Maksimum veri noktası sayısı: {self.max_data_points} olarak güncellendi.")
-        
-        # Mevcut verileri sınırla
-        for data_type in self.telemetry_data:
-            if len(self.telemetry_data[data_type]['values']) > self.max_data_points:
-                # Son N veriyi al
-                self.telemetry_data[data_type]['values'] = self.telemetry_data[data_type]['values'][-self.max_data_points:]
-                self.telemetry_data[data_type]['times'] = self.telemetry_data[data_type]['times'][-self.max_data_points:]
-                
-                # Grafikleri güncelle
-                if data_type in self.curves and data_type in ['Speed', 'Current', 'Voltage', 'Power']:
-                    times = self.telemetry_data[data_type]['times']
-                    values = self.telemetry_data[data_type]['values']
-                    
-                    if times and self.start_time:
-                        relative_times = [(t - self.start_time) / 60.0 for t in times]
-                        self.curves[data_type].setData(relative_times, values)
-    
-    def update_graphs_from_loaded_data(self):
-        """Yüklenen verilerden grafikleri güncelle"""
-        # JSON yüklendiğinde başlangıç zamanını ayarla
-        all_times = []
-        for data_type in self.telemetry_data:
-            if self.telemetry_data[data_type]['times']:
-                all_times.extend(self.telemetry_data[data_type]['times'])
-        
-        if all_times:
-            self.start_time = min(all_times)
-        
-        for data_type in ['Speed', 'Current', 'Voltage', 'Power']:
-            if data_type in self.curves and data_type in self.telemetry_data:
-                times = self.telemetry_data[data_type]['times']
-                values = self.telemetry_data[data_type]['values']
-                
-                if times and values and self.start_time:
-                    # Zaman eksenini dakika cinsinden relative yapmak için ilk zamanı çıkar ve 60'a böl
-                    relative_times = [(t - self.start_time) / 60.0 for t in times]
-                    self.curves[data_type].setData(relative_times, values)
+        self.log_message("🗑️ Telemetri verileri temizlendi (Hidrojen verileri korundu).")
 
-    def save_data_csv(self):
-        """Veriyi CSV formatında kaydet"""
-        if not any(self.telemetry_data[key]['values'] for key in self.telemetry_data):
-            QMessageBox.warning(self, "Uyarı", "Kaydedilecek veri yok!")
-            return
-            
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "CSV Dosyası Kaydet", 
-            f"telemetri_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            "CSV files (*.csv)"
-        )
-        
-        if filename:
-            try:
-                import csv
-                with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
-                    writer = csv.writer(csvfile)
-                    
-                    # Header
-                    headers = ['Timestamp', 'DateTime'] + list(self.telemetry_data.keys())
-                    writer.writerow(headers)
-                    
-                    # Tüm zaman damgalarını topla
-                    all_times = set()
-                    for key in self.telemetry_data:
-                        all_times.update(self.telemetry_data[key]['times'])
-                    
-                    all_times = sorted(all_times)
-                    
-                    # Her zaman damgası için satır yaz
-                    for timestamp in all_times:
-                        row = [timestamp, datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S.%f')]
-                        
-                        for key in self.telemetry_data:
-                            # Bu zaman damgasında bu veri var mı?
-                            if timestamp in self.telemetry_data[key]['times']:
-                                idx = self.telemetry_data[key]['times'].index(timestamp)
-                                value = self.telemetry_data[key]['values'][idx]
-                                row.append(value)
-                            else:
-                                row.append('')  # Boş değer
-                        
-                        writer.writerow(row)
-                
-                self.log_message(f"Veriler CSV olarak kaydedildi: {filename}")
-                QMessageBox.information(self, "Başarılı", f"Veriler kaydedildi:\n{filename}")
-                
-            except Exception as e:
-                QMessageBox.critical(self, "Hata", f"CSV kaydetme hatası:\n{str(e)}")
-                
     def save_data_json(self):
         """Veriyi JSON formatında kaydet - datetime anahtarlı yapı"""
         if not any(self.telemetry_data[key]['values'] for key in self.telemetry_data):
@@ -1688,7 +1301,10 @@ class TelemetryApp(QMainWindow):
                         'export_time': datetime.now().isoformat(),
                         'total_records': len(all_timestamps),
                         'data_types': list(self.telemetry_data.keys()),
-                        'format': 'datetime_keyed'
+                        'format': 'datetime_keyed',
+                        'total_distance_km': self.total_distance,
+                        'hydrogen_consumed_liters': self.hydrogen_consumed_liters,  # Yeni
+                        'hydrogen_efficiency_km_per_m3': self.hydrogen_efficiency  # Yeni
                     },
                     'data': {}
                 }
@@ -1708,20 +1324,26 @@ class TelemetryApp(QMainWindow):
                             value = self.telemetry_data[data_type]['values'][idx]
                             record[data_type] = value
                         else:
-                            record[data_type] = None  # Bu zaman damgasında bu veri yok
+                            record[data_type] = None
                     
                     json_data['data'][datetime_str] = record
                 
                 with open(filename, 'w', encoding='utf-8') as jsonfile:
                     json.dump(json_data, jsonfile, indent=2, ensure_ascii=False)
                 
-                self.log_message(f"💾 JSON kaydedildi: {len(all_timestamps)} kayıt, {filename}")
+                self.log_message(f"💾 JSON kaydedildi: {len(all_timestamps)} kayıt, "
+                               f"Mesafe: {self.total_distance:.3f} km, "
+                               f"H₂: {self.hydrogen_consumed_liters:.3f} L, "
+                               f"1m³ ile: {self.hydrogen_efficiency:.2f} km")
+                
                 QMessageBox.information(self, "Başarılı", 
                                       f"Veriler datetime anahtarlı JSON formatında kaydedildi!\n\n"
                                       f"📄 Dosya: {filename}\n"
                                       f"📊 Kayıt sayısı: {len(all_timestamps)}\n"
-                                      f"📈 Veri tipleri: {len(self.telemetry_data)}\n\n"
-                                      f"Analiz için: python analyze_telemetry.py \"{''.join(filename.split('/')[-1])}\"")
+                                      f"📈 Veri tipleri: {len(self.telemetry_data)}\n"
+                                      f"🛣️ Toplam Mesafe: {self.total_distance:.3f} km\n"
+                                      f"💧 Hidrojen: {self.hydrogen_consumed_liters:.3f} L\n"
+                                      f"✨ 1 m³ ile: {self.hydrogen_efficiency:.2f} km")
                 
             except Exception as e:
                 QMessageBox.critical(self, "Hata", f"JSON kaydetme hatası:\n{str(e)}")
@@ -1729,8 +1351,7 @@ class TelemetryApp(QMainWindow):
     def load_data_json(self):
         """JSON dosyasından veri yükle"""
         filename, _ = QFileDialog.getOpenFileName(
-            self, "JSON Dosyası Yükle", 
-            "",
+            self, "JSON Dosyası Aç", "",
             "JSON files (*.json);;All files (*.*)"
         )
         
@@ -1739,22 +1360,16 @@ class TelemetryApp(QMainWindow):
                 with open(filename, 'r', encoding='utf-8') as jsonfile:
                     json_data = json.load(jsonfile)
                 
-                # Dosya formatını kontrol et
-                if 'export_info' in json_data and 'data' in json_data:
-                    # Yeni format - datetime anahtarlı
+                # Format kontrolü
+                if 'data' in json_data and isinstance(json_data['data'], dict):
+                    # Datetime anahtarlı format
                     self.load_datetime_keyed_json(json_data, filename)
                 else:
-                    # Eski format veya farklı format
-                    QMessageBox.warning(self, "Uyarı", 
-                                      "Bu JSON dosyası desteklenen formatta değil!\n"
-                                      "Sadece bu uygulamayla kaydedilmiş JSON dosyaları yüklenebilir.")
-                    return
-                
-            except json.JSONDecodeError:
-                QMessageBox.critical(self, "Hata", "Geçersiz JSON dosyası!")
+                    QMessageBox.warning(self, "Uyarı", "Desteklenmeyen JSON formatı!")
+                    
             except Exception as e:
                 QMessageBox.critical(self, "Hata", f"JSON yükleme hatası:\n{str(e)}")
-    
+
     def load_datetime_keyed_json(self, json_data, filename):
         """Datetime anahtarlı JSON formatını yükle"""
         try:
@@ -1766,6 +1381,9 @@ class TelemetryApp(QMainWindow):
             total_records = export_info.get('total_records', 0)
             data_types = export_info.get('data_types', [])
             export_time = export_info.get('export_time', 'Bilinmiyor')
+            saved_distance = export_info.get('total_distance_km', 0.0)
+            saved_hydrogen = export_info.get('hydrogen_consumed_liters', 0.0)
+            saved_efficiency = export_info.get('hydrogen_efficiency_km_per_m3', 0.0)
             
             # Veri kayıtlarını yükle
             data_records = json_data.get('data', {})
@@ -1787,10 +1405,20 @@ class TelemetryApp(QMainWindow):
                         
                         loaded_count += 1
             
+            # Kaydedilmiş değerleri geri yükle
+            if saved_distance > 0:
+                self.total_distance = saved_distance
+            
+            if saved_hydrogen > 0:
+                self.hydrogen_consumed_liters = saved_hydrogen
+                self.hydrogen_input.setValue(saved_hydrogen)  # Float olarak ayarla
+            
+            if saved_efficiency > 0:
+                self.hydrogen_efficiency = saved_efficiency
+            
             # Veriyi zaman sırasına göre sırala
             for data_type in self.telemetry_data.keys():
                 if self.telemetry_data[data_type]['times']:
-                    # Zip ile eşleştir, sırala, sonra ayır
                     paired_data = list(zip(
                         self.telemetry_data[data_type]['times'],
                         self.telemetry_data[data_type]['values']
@@ -1807,43 +1435,182 @@ class TelemetryApp(QMainWindow):
             # Anlık değerleri son değerlerle güncelle
             self.update_current_values_from_loaded_data()
             
+            # Hidrojen göstergelerini güncelle
+            if 'Hydrogen' in self.value_labels:
+                self.value_labels['Hydrogen'].setText(f"{self.hydrogen_consumed_liters:.3f}")
+            
+            if 'Efficiency' in self.value_labels:
+                self.value_labels['Efficiency'].setText(f"{self.hydrogen_efficiency:.2f}")
+            
             # Başarı mesajı
-            self.log_message(f"📂 JSON dosyası yüklendi: {loaded_count} kayıt, {filename}")
+            self.log_message(f"📂 JSON yüklendi: {loaded_count} kayıt, "
+                           f"Mesafe: {self.total_distance:.3f} km, "
+                           f"H₂: {self.hydrogen_consumed_liters:.3f} L, "
+                           f"1m³ ile: {self.hydrogen_efficiency:.2f} km")
+            
             QMessageBox.information(self, "Başarılı", 
                                   f"JSON dosyası başarıyla yüklendi!\n\n"
                                   f"📄 Dosya: {filename.split('/')[-1]}\n"
                                   f"📊 Yüklenen kayıt: {loaded_count}\n"
                                   f"📈 Veri tipleri: {len([dt for dt in data_types if dt in self.telemetry_data])}\n"
+                                  f"🛣️ Toplam Mesafe: {self.total_distance:.3f} km\n"
+                                  f"💧 Hidrojen: {self.hydrogen_consumed_liters:.3f} L\n"
+                                  f"✨ 1 m³ ile: {self.hydrogen_efficiency:.2f} km\n"
                                   f"📅 Export zamanı: {export_time}")
             
         except Exception as e:
             QMessageBox.critical(self, "Hata", f"JSON veri işleme hatası:\n{str(e)}")
     
-    def show_data_analysis(self):
+    def show_analysis(self):
         """Veri analizi penceresini göster"""
-        # Veri var mı kontrol et
-        has_data = any(self.telemetry_data[key]['values'] for key in self.telemetry_data)
-        
-        if not has_data:
-            QMessageBox.warning(self, "Uyarı", 
-                              "Analiz edilecek veri bulunamadı!\n\n"
-                              "Veri toplamak için:\n"
-                              "1. Arduino'yu bağlayın ve veri toplayın\n"
-                              "   VEYA\n"
-                              "2. JSON dosyası yükleyin")
+        if not any(self.telemetry_data[key]['values'] for key in self.telemetry_data):
+            QMessageBox.warning(self, "Uyarı", "Analiz edilecek veri yok!")
             return
         
-        try:
-            # Analiz penceresini aç
-            dialog = DataAnalysisDialog(self.telemetry_data, self)
-            dialog.exec_()
+        analysis_dialog = DataAnalysisDialog(self.telemetry_data, self)
+        analysis_dialog.exec_()
+
+    def show_graph_context_menu(self, graph_key, graph_title, pos):
+        """Grafik için sağ tık menüsü göster"""
+        menu = QMenu(self)
+        
+        save_png_action = QAction(f"📷 {graph_title} PNG olarak kaydet", self)
+        save_png_action.triggered.connect(lambda: self.save_graph_as_image(graph_key, graph_title, 'png'))
+        menu.addAction(save_png_action)
+        
+        save_svg_action = QAction(f"📊 {graph_title} SVG olarak kaydet", self)
+        save_svg_action.triggered.connect(lambda: self.save_graph_as_image(graph_key, graph_title, 'svg'))
+        menu.addAction(save_svg_action)
+        
+        menu.addSeparator()
+        
+        save_all_png_action = QAction("📷 Tüm Grafikleri PNG olarak kaydet", self)
+        save_all_png_action.triggered.connect(lambda: self.save_all_graphs('png'))
+        menu.addAction(save_all_png_action)
+        
+        save_all_svg_action = QAction("📊 Tüm Grafikleri SVG olarak kaydet", self)
+        save_all_svg_action.triggered.connect(lambda: self.save_all_graphs('svg'))
+        menu.addAction(save_all_svg_action)
+        
+        menu.exec_(pos)
+    
+    def save_graph_as_image(self, graph_key, graph_title, format_type='png'):
+        """Tek bir grafiği resim olarak kaydet"""
+        if graph_key not in self.plots:
+            return
+        
+        filename, _ = QFileDialog.getSaveFileName(
+            self, f"{graph_title} Kaydet",
+            f"{graph_title.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{format_type}",
+            f"{format_type.upper()} files (*.{format_type});;All files (*.*)"
+        )
+        
+        if filename:
+            try:
+                exporter = pg.exporters.ImageExporter(self.plots[graph_key].plotItem)
+                exporter.export(filename)
+                self.log_message(f"💾 Grafik kaydedildi: {filename}")
+                QMessageBox.information(self, "Başarılı", f"{graph_title} grafiği kaydedildi!")
+            except Exception as e:
+                QMessageBox.critical(self, "Hata", f"Grafik kaydetme hatası:\n{str(e)}")
+    
+    def save_all_graphs(self, format_type='png'):
+        """Tüm grafikleri resim olarak kaydet"""
+        folder = QFileDialog.getExistingDirectory(self, "Grafiklerin Kaydedileceği Klasörü Seç")
+        
+        if folder:
+            try:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                saved_count = 0
+                
+                for graph_key, plot in self.plots.items():
+                    filename = os.path.join(folder, f"{graph_key}_{timestamp}.{format_type}")
+                    exporter = pg.exporters.ImageExporter(plot.plotItem)
+                    exporter.export(filename)
+                    saved_count += 1
+                
+                self.log_message(f"💾 {saved_count} grafik kaydedildi: {folder}")
+                QMessageBox.information(self, "Başarılı", 
+                                      f"{saved_count} grafik başarıyla kaydedildi!\n\n"
+                                      f"📁 Konum: {folder}")
+            except Exception as e:
+                QMessageBox.critical(self, "Hata", f"Grafik kaydetme hatası:\n{str(e)}")
+    
+    def update_port_list(self):
+        """Mevcut seri portları ve TCP simulatörünü listele"""
+        self.port_combo.clear()
+        
+        # Sanal Arduino simulatörünü ekle
+        self.port_combo.addItem("🖥️ Virtual Arduino Simulator (TCP)")
+        
+        # Gerçek seri portları tara
+        ports = serial.tools.list_ports.comports()
+        
+        if ports:
+            for port in ports:
+                self.port_combo.addItem(f"{port.device} - {port.description}")
+            self.log_message(f"✓ Virtual Arduino + {len(ports)} seri port bulundu")
+        else:
+            self.log_message("✓ Virtual Arduino hazır (seri port yok)")
+    
+    def toggle_connection(self):
+        """Seri port veya TCP bağlantısını aç/kapat"""
+        if self.serial_thread and self.serial_thread.is_running:
+            # Bağlantıyı kes
+            self.serial_thread.stop()
+            self.serial_thread.wait()
+            self.serial_thread = None
             
-        except Exception as e:
-            QMessageBox.critical(self, "Hata", f"Analiz penceresi açılırken hata:\n{str(e)}")
+            self.connect_btn.setText("Bağlan")
+            self.connect_btn.setStyleSheet("")
+            self.refresh_btn.setEnabled(True)
+            self.port_combo.setEnabled(True)
+            self.baudrate_combo.setEnabled(True)
+            
+            self.log_message("❌ Bağlantı kesildi")
+        else:
+            # Bağlan
+            port_text = self.port_combo.currentText()
+            if not port_text or port_text == "Port bulunamadı":
+                QMessageBox.warning(self, "Uyarı", "Geçerli bir port seçin!")
+                return
+            
+            try:
+                # Virtual Arduino kontrolü
+                if "Virtual Arduino" in port_text:
+                    # TCP bağlantısı
+                    self.serial_thread = TCPThread('localhost', 9999)
+                    self.log_message("🖥️ Virtual Arduino'ya bağlanılıyor (TCP)...")
+                else:
+                    # Gerçek seri port bağlantısı
+                    port = port_text.split(' - ')[0]
+                    baudrate = int(self.baudrate_combo.currentText())
+                    self.serial_thread = SerialThread(port, baudrate)
+                    self.log_message(f"📡 {port} portuna bağlanılıyor...")
+                
+                # Sinyalleri bağla
+                self.serial_thread.data_received.connect(self.update_data)
+                self.serial_thread.error_occurred.connect(self.handle_error)
+                self.serial_thread.start()
+                
+                # UI güncellemeleri
+                self.connect_btn.setText("Bağlantıyı Kes")
+                self.connect_btn.setStyleSheet("background-color: #4CAF50; color: white;")
+                self.refresh_btn.setEnabled(False)
+                self.port_combo.setEnabled(False)
+                self.baudrate_combo.setEnabled(False)
+                
+                if "Virtual Arduino" in port_text:
+                    self.log_message("✓ Virtual Arduino bağlantısı kuruldu (localhost:9999)")
+                else:
+                    self.log_message(f"✓ Seri port bağlantısı kuruldu")
+                    
+            except Exception as e:
+                QMessageBox.critical(self, "Hata", f"Bağlantı hatası:\n{str(e)}")
+                self.log_message(f"❌ Bağlantı hatası: {str(e)}")
     
     def update_graphs_from_loaded_data(self):
         """Yüklenen verilerden grafikleri güncelle"""
-        # JSON yüklendiğinde başlangıç zamanını ayarla
         all_times = []
         for data_type in self.telemetry_data:
             if self.telemetry_data[data_type]['times']:
@@ -1852,34 +1619,34 @@ class TelemetryApp(QMainWindow):
         if all_times:
             self.start_time = min(all_times)
         
+        # Sadece 4 grafik için güncelleme
         for data_type in ['Speed', 'Current', 'Voltage', 'Power']:
             if data_type in self.curves and data_type in self.telemetry_data:
                 times = self.telemetry_data[data_type]['times']
                 values = self.telemetry_data[data_type]['values']
                 
                 if times and values and self.start_time:
-                    # Zaman eksenini dakika cinsinden relative yapmak için ilk zamanı çıkar ve 60'a böl
                     relative_times = [(t - self.start_time) / 60.0 for t in times]
                     self.curves[data_type].setData(relative_times, values)
-
+    
     def update_current_values_from_loaded_data(self):
         """Yüklenen verilerden anlık değerleri güncelle"""
         for data_type in self.value_labels.keys():
             if (data_type in self.telemetry_data and 
                 self.telemetry_data[data_type]['values']):
                 
-                # Son değeri al
                 last_value = self.telemetry_data[data_type]['values'][-1]
                 
                 if data_type in ['RPM', 'ERPM']:
                     self.value_labels[data_type].setText(f"{int(last_value)}")
+                elif data_type == 'Distance':
+                    self.value_labels[data_type].setText(f"{last_value:.3f}")
                 else:
                     self.value_labels[data_type].setText(f"{last_value:.2f}")
                 
-                # Hız gösterimini de güncelle
                 if data_type == 'Speed':
                     self.speed_display.set_speed(last_value)
-                
+
     def handle_error(self, error_message):
         """Hata mesajlarını işle"""
         self.log_message(f"HATA: {error_message}")
@@ -1891,7 +1658,7 @@ class TelemetryApp(QMainWindow):
             self.serial_thread = None
             self.connect_btn.setText("Bağlan")
             self.connect_btn.setStyleSheet("")
-            
+    
     def log_message(self, message):
         """Log mesajı ekle"""
         timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
