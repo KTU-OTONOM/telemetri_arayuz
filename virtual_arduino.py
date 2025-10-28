@@ -32,6 +32,9 @@ class VirtualSerialSimulator:
         self.voltage = 19.5
         self.power = 0.0
         
+        # Mesafe takibi için
+        self.last_time = time.time()
+    
     def start_server(self):
         """TCP server başlat"""
         try:
@@ -45,6 +48,7 @@ class VirtualSerialSimulator:
             
             self.client_socket, addr = self.server_socket.accept()
             print(f"✅ Bağlantı kuruldu: {addr}")
+            print("📊 Veri gönderimi başladı...")
             return True
             
         except Exception as e:
@@ -53,15 +57,18 @@ class VirtualSerialSimulator:
     
     def generate_data(self):
         """Gerçekçi telemetri verisi üret"""
-        # Rastgele değişimler - daha gerçekçi
-        self.erpm += random.randint(-50, 50)
-        self.erpm = max(-2000, min(2000, self.erpm))
+        # Rastgele değişimler - daha gerçekçi (küçük adımlar)
+        change = random.randint(-30, 40)  # Daha yumuşak değişimler
+        self.erpm += change
+        self.erpm = max(-3000, min(3000, self.erpm))  # Daha geniş aralık
         
         # RPM hesapla
         self.rpm = abs(self.erpm) // 14  # Gear ratio
         
         # Hız hesapla (km/h olarak)
-        self.speed = abs(self.erpm) * 0.008
+        # Hız = RPM × tekerlek çapı × π / 60
+        wheel_diameter_m = 0.5  # 50cm çaplı tekerlek
+        self.speed = (abs(self.rpm) * wheel_diameter_m * 3.14159 * 60) / 1000
         self.speed = max(0, min(80, self.speed))
         
         # Akım hesapla (yük ile ilişkili)
@@ -93,7 +100,7 @@ class VirtualSerialSimulator:
             f"{timestamp} -> ----- ALINAN VERİ -----",
             f"{timestamp} -> ERPM: {int(self.erpm)}",
             f"{timestamp} -> RPM: {int(self.rpm)}",
-            f"{timestamp} -> Hız (km/s): {self.speed:.2f}",
+            f"{timestamp} -> Hız (km/h): {self.speed:.2f}",
             f"{timestamp} -> Akım (A): {self.current:.2f}",
             f"{timestamp} -> Duty: {int(self.duty)}",
             f"{timestamp} -> Gerilim (V): {self.voltage:.2f}",
@@ -109,6 +116,7 @@ class VirtualSerialSimulator:
             return
             
         self.is_running = True
+        data_count = 0
         
         try:
             while self.is_running:
@@ -119,15 +127,22 @@ class VirtualSerialSimulator:
                     
                     try:
                         self.client_socket.send(data.encode('utf-8'))
-                        print(f"📤 Veri gönderildi: ERPM={int(self.erpm)}, Hız={self.speed:.1f}km/h, Akım={self.current:.1f}A")
+                        data_count += 1
+                        
+                        # Her 50 pakette bir özet bilgi göster (yaklaşık her 5 saniyede)
+                        if data_count % 50 == 0:
+                            print(f"📤 {data_count} veri paketi gönderildi | "
+                                  f"Hız: {self.speed:.1f}km/h | "
+                                  f"Akım: {self.current:.1f}A | "
+                                  f"Güç: {self.power:.1f}W")
                     except (ConnectionResetError, BrokenPipeError):
                         print("🔌 Bağlantı kesildi!")
                         break
                 
-                time.sleep(1)  # 1 saniye bekle
+                time.sleep(0.1)  # 100ms (0.1 saniye) bekle - 10 paket/saniye
                 
         except KeyboardInterrupt:
-            print("\n⏹️ Simülasyon durduruldu.")
+            print(f"\n⏹️ Simülasyon durduruldu. Toplam {data_count} veri paketi gönderildi.")
         finally:
             self.cleanup()
     
@@ -135,10 +150,17 @@ class VirtualSerialSimulator:
         """Temizlik işlemleri"""
         self.is_running = False
         if self.client_socket:
-            self.client_socket.close()
+            try:
+                self.client_socket.close()
+            except:
+                pass
         if self.server_socket:
-            self.server_socket.close()
+            try:
+                self.server_socket.close()
+            except:
+                pass
         print("🧹 Temizlik tamamlandı.")
+
 
 class FileSimulator:
     """Dosya tabanlı simulatör - test amaçlı"""
@@ -158,11 +180,15 @@ class FileSimulator:
     
     def generate_data(self):
         """VirtualSerialSimulator ile aynı veri üretimi"""
-        self.erpm += random.randint(-50, 50)
+        change = random.randint(-50, 50)
+        self.erpm += change
         self.erpm = max(-2000, min(2000, self.erpm))
         
         self.rpm = abs(self.erpm) // 14
-        self.speed = abs(self.erpm) * 0.008
+        
+        # Hız hesaplama (km/h)
+        wheel_diameter_m = 0.5
+        self.speed = (abs(self.rpm) * wheel_diameter_m * 3.14159 * 60) / 1000
         self.speed = max(0, min(80, self.speed))
         
         base_current = abs(self.erpm) * 0.002
@@ -193,6 +219,7 @@ class FileSimulator:
             f.write("=" * 50 + "\n\n")
             
             start_time = time.time()
+            data_count = 0
             
             try:
                 while time.time() - start_time < duration:
@@ -203,7 +230,7 @@ class FileSimulator:
                         f"{timestamp} -> ----- ALINAN VERİ -----",
                         f"{timestamp} -> ERPM: {int(self.erpm)}",
                         f"{timestamp} -> RPM: {int(self.rpm)}",
-                        f"{timestamp} -> Hız (km/s): {self.speed:.2f}",
+                        f"{timestamp} -> Hız (km/h): {self.speed:.2f}",
                         f"{timestamp} -> Akım (A): {self.current:.2f}",
                         f"{timestamp} -> Duty: {int(self.duty)}",
                         f"{timestamp} -> Gerilim (V): {self.voltage:.2f}",
@@ -213,34 +240,49 @@ class FileSimulator:
                     
                     for line in lines:
                         f.write(line + "\n")
-                        print(line)
+                    
+                    data_count += 1
+                    
+                    # Her 50 pakette bir konsola bilgi yazdır
+                    if data_count % 50 == 0:
+                        print(f"📝 {data_count} veri paketi yazıldı...")
                     
                     f.flush()  # Hemen dosyaya yaz
-                    time.sleep(1)
+                    time.sleep(0.1)  # 100ms bekle - 10 paket/saniye
                     
             except KeyboardInterrupt:
                 print("\n⏹️ Simülasyon durduruldu.")
         
-        print(f"✅ Simülasyon tamamlandı. Veriler: {self.filename}")
+        print(f"✅ Simülasyon tamamlandı. Toplam {data_count} veri paketi.")
+        print(f"📁 Veriler: {self.filename}")
+
 
 def main():
-    print("🚀 Arduino Telemetri Simulatörü v2.0")
-    print("=" * 40)
+    print("🚀 Arduino Telemetri Simulatörü v3.1 (Hızlı Mod)")
+    print("=" * 50)
+    print()
     
     if len(sys.argv) > 1:
         mode = sys.argv[1].lower()
     else:
         print("Kullanım modları:")
-        print("1. python arduino_simulator.py tcp    - TCP server modu")
-        print("2. python arduino_simulator.py file   - Dosya modu")
-        print("3. python arduino_simulator.py console - Konsol modu")
+        print("1. tcp    - TCP server modu (önerilen)")
+        print("2. file   - Dosya modu")
         print()
-        mode = input("Mod seçin (tcp/file/console) [tcp]: ").lower() or 'tcp'
+        mode = input("Mod seçin (tcp/file) [tcp]: ").lower() or 'tcp'
     
     if mode == 'tcp':
         # TCP server modu
         host = sys.argv[2] if len(sys.argv) > 2 else 'localhost'
         port = int(sys.argv[3]) if len(sys.argv) > 3 else 9999
+        
+        print(f"\n🔧 Ayarlar:")
+        print(f"   Host: {host}")
+        print(f"   Port: {port}")
+        print(f"   Hız: 10 paket/saniye (100ms aralık)")
+        print(f"\n💡 Bağlantı komutu:")
+        print(f"   Telemetri arayüzünde 'socket://{host}:{port}' seçin")
+        print()
         
         simulator = VirtualSerialSimulator(host, port)
         simulator.run_simulation()
@@ -250,17 +292,18 @@ def main():
         filename = sys.argv[2] if len(sys.argv) > 2 else "arduino_data.txt"
         duration = int(sys.argv[3]) if len(sys.argv) > 3 else 60
         
+        print(f"\n🔧 Ayarlar:")
+        print(f"   Dosya: {filename}")
+        print(f"   Süre: {duration} saniye")
+        print(f"   Hız: 10 paket/saniye (100ms aralık)")
+        print()
+        
         simulator = FileSimulator(filename)
         simulator.run_simulation(duration)
         
-    elif mode == 'console':
-        # Konsol modu (eski versiyon)
-        from arduino_simulator import ArduinoSimulator
-        simulator = ArduinoSimulator()
-        simulator.run_simulation()
-        
     else:
-        print("❌ Geçersiz mod! tcp, file veya console seçin.")
+        print("❌ Geçersiz mod! tcp veya file seçin.")
+
 
 if __name__ == '__main__':
     main()
