@@ -904,6 +904,10 @@ class TelemetryApp(QMainWindow):
     
     def create_log_panel(self, parent_layout):
         """Log panelini ve kaydetme butonlarını oluştur"""
+        # Ana yatay layout - konsol ve logolar yan yana
+        log_main_layout = QHBoxLayout()
+        
+        # Sol kısım - İşlem Geçmişi
         log_group = QGroupBox("İşlem Geçmişi")
         log_layout = QVBoxLayout(log_group)
         
@@ -980,7 +984,48 @@ class TelemetryApp(QMainWindow):
         save_layout.addWidget(analyze_btn)
         
         log_layout.addLayout(save_layout)
-        parent_layout.addWidget(log_group)
+        log_main_layout.addWidget(log_group)
+        
+        # Sağ kısım - Logolar
+        logo_group = QGroupBox("")
+        logo_layout = QHBoxLayout(logo_group)  # VBoxLayout yerine HBoxLayout
+        logo_layout.setAlignment(Qt.AlignCenter)
+        
+        # KTECH logosu
+        ktech_logo_label = QLabel()
+        ktech_logo_path = os.path.join(os.path.dirname(__file__), 'images', 'ktech.png')
+        if os.path.exists(ktech_logo_path):
+            ktech_pixmap = QPixmap(ktech_logo_path)
+            # Logo boyutunu ayarla (yükseklik: 60px)
+            ktech_pixmap = ktech_pixmap.scaledToHeight(150, Qt.SmoothTransformation)
+            ktech_logo_label.setPixmap(ktech_pixmap)
+        else:
+            ktech_logo_label.setText("KTECH")
+            ktech_logo_label.setStyleSheet("color: white; font-weight: bold; font-size: 16pt;")
+        ktech_logo_label.setAlignment(Qt.AlignCenter)
+        logo_layout.addWidget(ktech_logo_label)
+        
+        # Boşluk
+        logo_layout.addSpacing(20)
+        
+        # KATOT logosu
+        katot_logo_label = QLabel()
+        katot_logo_path = os.path.join(os.path.dirname(__file__), 'images', 'katot.png')
+        if os.path.exists(katot_logo_path):
+            katot_pixmap = QPixmap(katot_logo_path)
+            # Logo boyutunu ayarla (yükseklik: 60px)
+            katot_pixmap = katot_pixmap.scaledToHeight(150, Qt.SmoothTransformation)
+            katot_logo_label.setPixmap(katot_pixmap)
+        else:
+            katot_logo_label.setText("KATOT")
+            katot_logo_label.setStyleSheet("color: white; font-weight: bold; font-size: 16pt;")
+        katot_logo_label.setAlignment(Qt.AlignCenter)
+        logo_layout.addWidget(katot_logo_label)
+        
+        logo_group.setMaximumWidth(350)  # Genişlik artırıldı
+        log_main_layout.addWidget(logo_group)
+        
+        parent_layout.addLayout(log_main_layout)
 
     def create_graphs_panel(self, parent_layout):
         """Grafik panelini oluştur - 4 grafik"""
@@ -1012,6 +1057,17 @@ class TelemetryApp(QMainWindow):
             plot.setLabel('bottom', 'Zaman (dakika)')
             plot.setLabel('left', title)
             plot.showGrid(x=True, y=True, alpha=0.3)
+            
+            # Bağımsız zoom ve pan özellikleri
+            plot.setMouseEnabled(x=True, y=True)  # Mouse ile zoom/pan aktif
+            
+            # ViewBox ayarları - her eksen bağımsız
+            vb = plot.getViewBox()
+            vb.setMouseMode(pg.ViewBox.PanMode)  # Pan (sürükleme) modu varsayılan
+            
+            # Mouse tekerleği ile zoom
+            vb.enableAutoRange(enable=False)  # Otomatik aralık kapalı
+            vb.setLimits(xMin=None, xMax=None, yMin=None, yMax=None)  # Sınırsız hareket
             
             # Plot stilini ayarla - koyu tema
             plot.getAxis('left').setPen('#cccccc')
@@ -1470,9 +1526,60 @@ class TelemetryApp(QMainWindow):
         analysis_dialog = DataAnalysisDialog(self.telemetry_data, self)
         analysis_dialog.exec_()
 
+    def reset_graph_view(self, graph_key):
+        """Grafik görünümünü sıfırla ve tüm veriyi göster"""
+        if graph_key in self.plots:
+            plot = self.plots[graph_key]
+            plot.autoRange()
+            self.log_message(f"🔄 {graph_key} grafiği sıfırlandı")
+    
+    def enable_auto_range(self, graph_key):
+        """Otomatik aralık özelliğini aktif et"""
+        if graph_key in self.plots:
+            plot = self.plots[graph_key]
+            plot.enableAutoRange()
+            self.log_message(f"📐 {graph_key} için otomatik aralık aktif")
+    
+    def set_mouse_mode(self, graph_key, mode):
+        """Mouse modunu ayarla (dikdörtgen zoom veya pan)"""
+        if graph_key in self.plots:
+            plot = self.plots[graph_key]
+            vb = plot.getViewBox()
+            
+            if mode == 'rect':
+                vb.setMouseMode(pg.ViewBox.RectMode)
+                self.log_message(f"🖱️ {graph_key}: Dikdörtgen zoom modu")
+            elif mode == 'pan':
+                vb.setMouseMode(pg.ViewBox.PanMode)
+                self.log_message(f"🖱️ {graph_key}: Pan (kaydırma) modu")
+
     def show_graph_context_menu(self, graph_key, graph_title, pos):
         """Grafik için sağ tık menüsü göster"""
         menu = QMenu(self)
+        
+        # Zoom ve görünüm kontrolleri
+        reset_view_action = QAction("🔄 Görünümü Sıfırla", self)
+        reset_view_action.triggered.connect(lambda: self.reset_graph_view(graph_key))
+        menu.addAction(reset_view_action)
+        
+        auto_range_action = QAction("📐 Otomatik Aralık", self)
+        auto_range_action.triggered.connect(lambda: self.enable_auto_range(graph_key))
+        menu.addAction(auto_range_action)
+        
+        menu.addSeparator()
+        
+        # Mouse modu seçimi
+        mouse_mode_menu = menu.addMenu("🖱️ Mouse Modu")
+        
+        rect_mode_action = QAction("▭ Dikdörtgen Zoom", self)
+        rect_mode_action.triggered.connect(lambda: self.set_mouse_mode(graph_key, 'rect'))
+        mouse_mode_menu.addAction(rect_mode_action)
+        
+        pan_mode_action = QAction("✋ Pan (Kaydırma)", self)
+        pan_mode_action.triggered.connect(lambda: self.set_mouse_mode(graph_key, 'pan'))
+        mouse_mode_menu.addAction(pan_mode_action)
+        
+        menu.addSeparator()
         
         save_png_action = QAction(f"📷 {graph_title} PNG olarak kaydet", self)
         save_png_action.triggered.connect(lambda: self.save_graph_as_image(graph_key, graph_title, 'png'))
